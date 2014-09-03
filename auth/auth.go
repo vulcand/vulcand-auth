@@ -80,7 +80,7 @@ func FromCli(c *cli.Context) (plugin.Middleware, error) {
 
 func CliFlags() []cli.Flag {
 	return []cli.Flag{
-		cli.StringFlag{"user, u", "", "Basic auth username"},
-		cli.StringFlag{"pass, p", "", "Basic auth pass"},
+		cli.StringFlag{"user", "u", "", "Basic auth username"},
+		cli.StringFlag{"pass", "p", "", "Basic auth pass"},
 	}
 }
