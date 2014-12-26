@@ -1,4 +1,4 @@
-vulcand-helloworld
-==================
+vulcand-auth
+============
 
-Helloworld vulcand plugin
+This is a demo middleware that is compatible with Vulcand.
