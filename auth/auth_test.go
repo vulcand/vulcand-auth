@@ -1,12 +1,15 @@
 package auth
 
 import (
-	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/codegangsta/cli"
-	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/mailgun/vulcan/netutils"
-	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/mailgun/vulcan/request"
-	. "github.com/mailgun/vulcand/Godeps/_workspace/src/launchpad.net/gocheck"
-	"github.com/mailgun/vulcand/plugin"
+	"io"
 	"net/http"
+	"net/http/httptest"
+
+	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/codegangsta/cli"
+	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/mailgun/oxy/testutils"
+	. "github.com/mailgun/vulcand/Godeps/_workspace/src/gopkg.in/check.v1"
+	"github.com/mailgun/vulcand/plugin"
+
 	"testing"
 )
 
@@ -23,36 +26,36 @@ func (s *AuthSuite) TestSpecIsOK(c *C) {
 	c.Assert(plugin.NewRegistry().AddSpec(GetSpec()), IsNil)
 }
 
-func (s *AuthSuite) TestNewConnLimitSuccess(c *C) {
-	cl, err := NewAuth("user", "pass")
+func (s *AuthSuite) TestNew(c *C) {
+	cl, err := New("user", "pass")
 	c.Assert(cl, NotNil)
 	c.Assert(err, IsNil)
 
 	c.Assert(cl.String(), Not(Equals), "")
 
-	out, err := cl.NewMiddleware()
+	out, err := cl.NewHandler(nil)
 	c.Assert(out, NotNil)
 	c.Assert(err, IsNil)
 }
 
-func (s *AuthSuite) TestNewAuthBadParams(c *C) {
+func (s *AuthSuite) TestNewBadParams(c *C) {
 	// Empty pass
-	_, err := NewAuth("user", "")
+	_, err := New("user", "")
 	c.Assert(err, NotNil)
 
 	// Empty user
-	_, err = NewAuth("", "pass")
+	_, err = New("", "pass")
 	c.Assert(err, NotNil)
 }
 
-func (s *AuthSuite) TestAuthFromOther(c *C) {
-	cl, err := NewAuth("user", "pass")
-	c.Assert(cl, NotNil)
+func (s *AuthSuite) TestFromOther(c *C) {
+	a, err := New("user", "pass")
+	c.Assert(a, NotNil)
 	c.Assert(err, IsNil)
 
-	out, err := FromOther(*cl)
+	out, err := FromOther(*a)
 	c.Assert(err, IsNil)
-	c.Assert(out, DeepEquals, cl)
+	c.Assert(out, DeepEquals, a)
 }
 
 func (s *AuthSuite) TestAuthFromCli(c *C) {
@@ -65,7 +68,7 @@ func (s *AuthSuite) TestAuthFromCli(c *C) {
 		c.Assert(out, NotNil)
 		c.Assert(err, IsNil)
 
-		a := out.(*Auth)
+		a := out.(*AuthMiddleware)
 		c.Assert(a.Password, Equals, "pass1")
 		c.Assert(a.Username, Equals, "user1")
 	}
@@ -75,48 +78,48 @@ func (s *AuthSuite) TestAuthFromCli(c *C) {
 }
 
 func (s *AuthSuite) TestRequestSuccess(c *C) {
-	a := &Auth{Username: "Aladdin", Password: "open sesame"}
-	out, err := a.ProcessRequest(makeRequest(a.Username, a.Password))
-	c.Assert(out, IsNil)
+	a := &AuthMiddleware{Username: "aladdin", Password: "open sesame"}
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "treasure")
+	})
+
+	auth, err := a.NewHandler(h)
 	c.Assert(err, IsNil)
+
+	srv := httptest.NewServer(auth)
+	defer srv.Close()
+
+	_, body, err := testutils.Get(srv.URL, testutils.BasicAuth(a.Username, a.Password))
+	c.Assert(err, IsNil)
+	c.Assert(string(body), Equals, "treasure")
 }
 
 func (s *AuthSuite) TestRequestBadPassword(c *C) {
-	a := &Auth{Username: "Aladdin", Password: "open sesame"}
-	out, err := a.ProcessRequest(makeRequest(a.Username, "what?"))
-	c.Assert(out, NotNil)
-	c.Assert(err, IsNil)
-}
+	a := &AuthMiddleware{Username: "aladdin", Password: "open sesame"}
 
-func (s *AuthSuite) TestRequestMissingPass(c *C) {
-	a := &Auth{Username: "Aladdin", Password: "open sesame"}
-	out, err := a.ProcessRequest(&request.BaseRequest{HttpRequest: &http.Request{}})
-	c.Assert(out, NotNil)
-	c.Assert(err, IsNil)
-}
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "treasure")
+	})
 
-func (s *AuthSuite) TestRequestBadPass(c *C) {
-	request := &request.BaseRequest{
-		HttpRequest: &http.Request{
-			Method: "GET",
-			Header: map[string][]string{
-				"Authorization": []string{"Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="},
-			},
-		},
-	}
-	a := &Auth{Username: "Aladdin", Password: "open sesame"}
-	out, err := a.ProcessRequest(request)
-	c.Assert(out, IsNil)
+	auth, err := a.NewHandler(h)
 	c.Assert(err, IsNil)
-}
 
-func makeRequest(username string, password string) request.Request {
-	return &request.BaseRequest{
-		HttpRequest: &http.Request{
-			Method: "GET",
-			Header: map[string][]string{
-				"Authorization": []string{(&netutils.BasicAuth{Username: username, Password: password}).String()},
-			},
-		},
-	}
+	srv := httptest.NewServer(auth)
+	defer srv.Close()
+
+	// bad pass
+	re, _, err := testutils.Get(srv.URL, testutils.BasicAuth(a.Username, "open please"))
+	c.Assert(err, IsNil)
+	c.Assert(re.StatusCode, Equals, http.StatusForbidden)
+
+	// missing header
+	re, _, err = testutils.Get(srv.URL)
+	c.Assert(err, IsNil)
+	c.Assert(re.StatusCode, Equals, http.StatusForbidden)
+
+	// malformed header
+	re, _, err = testutils.Get(srv.URL, testutils.Header("Authorization", "blablabla="))
+	c.Assert(err, IsNil)
+	c.Assert(re.StatusCode, Equals, http.StatusForbidden)
 }

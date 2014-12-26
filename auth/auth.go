@@ -1,15 +1,15 @@
 package auth
 
 // Note that I import the versions bundled with vulcand. That will make our lives easier, as we'll use exactly the same versions used
-// by vulcand. Kind of escaping dependency management troubles thanks to Godep.
+// by vulcand. We are escaping dependency management troubles thanks to Godep.
 import (
 	"fmt"
-	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/codegangsta/cli"
-	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/mailgun/vulcan/middleware"
-	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/mailgun/vulcan/netutils"
-	. "github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/mailgun/vulcan/request"
-	"github.com/mailgun/vulcand/plugin"
+	"io"
 	"net/http"
+
+	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/codegangsta/cli"
+	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/mailgun/oxy/utils"
+	"github.com/mailgun/vulcand/plugin"
 )
 
 const Type = "auth"
@@ -23,61 +23,66 @@ func GetSpec() *plugin.MiddlewareSpec {
 	}
 }
 
-// Auth middleware
-type Auth struct {
+// AuthMiiddleware struct holds configuration parameters and is used to
+// serialize/deserialize the configuration from storage engines.
+type AuthMiddleware struct {
 	Password string
 	Username string
 }
 
-// This function will be called each time the request hits the location with this middleware activated
-func (a *Auth) ProcessRequest(r Request) (*http.Response, error) {
-	auth, err := netutils.ParseAuthHeader(r.GetHttpRequest().Header.Get("Authorization"))
-	// We want to reject the request, so we create and return ``Forbidden`` response
-	if err != nil || a.Username != auth.Username || a.Password != auth.Password {
-		return netutils.NewTextResponse(r.GetHttpRequest(), http.StatusForbidden, "Forbidden"), nil
-	}
-	// Return a pair ``nil, nil`` indicates that we let the request continue
-	// to the next middleware in chain or the endpoint
-	return nil, nil
+// Auth middleware handler
+type AuthHandler struct {
+	cfg  AuthMiddleware
+	next http.Handler
 }
 
-func (*Auth) ProcessResponse(r Request, a Attempt) {
+// This function will be called each time the request hits the location with this middleware activated
+func (a *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	auth, err := utils.ParseAuthHeader(r.Header.Get("Authorization"))
+	// Reject the request by writing forbidden response
+	if err != nil || a.cfg.Username != auth.Username || a.cfg.Password != auth.Password {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, "Forbidden")
+		return
+	}
+	// Pass the request to the next middleware in chain
+	a.next.ServeHTTP(w, r)
 }
 
 // This function is optional but handy, used to check input parameters when creating new middlewares
-func NewAuth(user, pass string) (*Auth, error) {
+func New(user, pass string) (*AuthMiddleware, error) {
 	if user == "" || pass == "" {
 		return nil, fmt.Errorf("Username and password can not be empty")
 	}
-	return &Auth{Username: user, Password: pass}, nil
+	return &AuthMiddleware{Username: user, Password: pass}, nil
 }
 
-// This function is important, it's called by vulcand to create a new instance of the middleware and put it into the
-// middleware chain for the location. In our case we just return our existing instance. In more complex cases you
-// may want to return something else or construct a different object
-func (r *Auth) NewMiddleware() (middleware.Middleware, error) {
-	return r, nil
+// This function is important, it's called by vulcand to create a new handler from the middleware config and put it into the
+// middleware chain. Note that we need to remember 'next' handler to call
+func (c *AuthMiddleware) NewHandler(next http.Handler) (http.Handler, error) {
+	return &AuthHandler{next: next, cfg: *c}, nil
 }
 
-// Very insecure :-)
-func (r *Auth) String() string {
-	return fmt.Sprintf("username=%s, pass=%s", r.Username, r.Password)
+// String() will be called by loggers inside Vulcand and command line tool.
+func (c *AuthMiddleware) String() string {
+	return fmt.Sprintf("username=%v, pass=%v", c.Username, "********")
 }
 
-// Will be called by Vulcand when backend or API will read the middleware from the serialized bytes.
+// FromOther Will be called by Vulcand when engine or API will read the middleware from the serialized format.
 // It's important that the signature of the function will be exactly the same, otherwise Vulcand will
 // fail to register this middleware.
 // The first and the only parameter should be the struct itself, no pointers and other variables.
 // Function should return middleware interface and error in case if the parameters are wrong.
-func FromOther(a Auth) (plugin.Middleware, error) {
-	return NewAuth(a.Username, a.Password)
+func FromOther(c AuthMiddleware) (plugin.Middleware, error) {
+	return New(c.Username, c.Password)
 }
 
-// Constructs the middleware from the command line
+// FromCli constructs the middleware from the command line
 func FromCli(c *cli.Context) (plugin.Middleware, error) {
-	return NewAuth(c.String("user"), c.String("pass"))
+	return New(c.String("user"), c.String("pass"))
 }
 
+// CliFlags will be used by Vulcand construct help and CLI command for the vctl command
 func CliFlags() []cli.Flag {
 	return []cli.Flag{
 		cli.StringFlag{"user, u", "", "Basic auth username", ""},
